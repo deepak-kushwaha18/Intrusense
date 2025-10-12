@@ -1,8 +1,7 @@
 """
 eventlog_module.py
 
-Windows Event Log helper with improved formatting and best-effort Applications & Services Logs enumeration.
-
+Windows Event Log helper with improved formatting.
 APIs:
 - list_known_logs() -> Dict[str, List[str]]
 - read_events(log_name="Security", max_records=50) -> List[Dict]
@@ -24,16 +23,6 @@ else:
     win32evtlog = None
     win32evtlogutil = None
 
-# Common candidate Applications & Services channels to probe (non-exhaustive)
-_COMMON_APPS_AND_SERVICES = [
-    "Microsoft-Windows-TaskScheduler/Operational",
-    "Microsoft-Windows-Windows Defender/Operational",
-    "Microsoft-Windows-Diagnostics-Performance/Operational",
-    "Microsoft-Windows-AppXDeploymentServer/Admin",
-    "Microsoft-Windows-Eventlog/Operational",
-    "Microsoft-Windows-Shell-Core/Operational"
-]
-
 
 def _level_from_event_type(ev_type: Optional[int]) -> str:
     if not win32evtlog:
@@ -49,6 +38,7 @@ def _level_from_event_type(ev_type: Optional[int]) -> str:
 
 
 def _safe_format_message(ev, log_name: Optional[str] = None) -> str:
+    # Try SafeFormatMessage; fall back to insertion strings or str(ev).
     if not IS_WINDOWS or not win32evtlog:
         return "<event formatting not available>"
 
@@ -80,6 +70,7 @@ def _safe_format_message(ev, log_name: Optional[str] = None) -> str:
 
 
 def _best_effort_user(ev) -> str:
+    # Try to extract a usable user string.
     try:
         if hasattr(ev, "UserSid") and getattr(ev, "UserSid") is not None:
             return str(getattr(ev, "UserSid"))
@@ -98,6 +89,7 @@ def _best_effort_user(ev) -> str:
 
 
 def read_events(log_name: str = "Security", max_records: int = 50) -> List[Dict[str, Any]]:
+    # Read events from Windows Event Log, return an error entry if not possible.
     if not IS_WINDOWS or not win32evtlog:
         return [{
             "time": "",
@@ -128,7 +120,7 @@ def read_events(log_name: str = "Security", max_records: int = 50) -> List[Dict[
                 "source": "",
                 "event_id": "",
                 "category": "",
-                "msg": f"Unable to open '{log_name}' log: {e}. Try running this tool as Administrator to view this log.",
+                "msg": f"Unable to open '{log_name}' log: {e}. Try running as Administrator to view this log.",
                 "raw": None,
                 "computer": "Unavailable",
                 "record_number": "Unavailable",
@@ -213,6 +205,7 @@ def read_events(log_name: str = "Security", max_records: int = 50) -> List[Dict[
 
 
 def get_full_message(ev: Dict[str, Any]) -> str:
+    # Return fully formatted message when possible.
     if not ev:
         return "<no event>"
     raw = ev.get("raw")
@@ -225,25 +218,10 @@ def get_full_message(ev: Dict[str, Any]) -> str:
 
 
 def list_known_logs() -> Dict[str, List[str]]:
-    """
-    Return hierarchy for left pane using the label "Administrative Views" (instead of Custom Views).
-    """
+    # Return two-pane hierarchy: Administrative Views and Windows Logs.
     result: Dict[str, List[str]] = {}
     result["Administrative Views"] = ["Administrative Events"]
     result["Windows Logs"] = ["Application", "Security", "Setup", "System"]
-
-    apps = []
-    if IS_WINDOWS and win32evtlog:
-        for ch in _COMMON_APPS_AND_SERVICES:
-            try:
-                evs = read_events(ch, max_records=1)
-                if evs and not (isinstance(evs, list) and evs[0].get("error")):
-                    apps.append(ch)
-            except Exception:
-                continue
-    if not apps:
-        apps = ["(no enumerable apps/services logs or not accessible)"]
-    result["Applications and Services Logs"] = apps
     return result
 
 
