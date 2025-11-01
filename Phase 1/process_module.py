@@ -21,9 +21,12 @@ def _rss_to_mb(mem_info) -> float:
         return 0.0
 
 
-def get_process_rows(pid_digits_filter: str = "") -> List[Row]:
-    # Return rows: (pid, name, user, cpu%, memMB); optional PID substring filter
-    digits_only = ''.join(ch for ch in (pid_digits_filter or "") if ch.isdigit())
+# process_module.py
+
+def get_process_rows(filter_text: str = "") -> List[Row]:
+    # Return rows: (pid, name, user, cpu%, memMB); optional PID or Name filter
+    # We no longer filter for digits only, we use the raw text
+    filter_lower = (filter_text or "").strip().lower()
 
     rows: List[Row] = []
     for proc in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_info']):
@@ -33,8 +36,12 @@ def get_process_rows(pid_digits_filter: str = "") -> List[Row]:
                 continue
 
             pid = int(proc.info['pid'])
-            if digits_only and digits_only not in str(pid):
-                continue
+            
+            # --- NEW FILTER LOGIC ---
+            if filter_lower:
+                if filter_lower not in str(pid) and filter_lower not in name.lower():
+                    continue
+            # --- END NEW FILTER LOGIC ---
 
             user = proc.info.get('username') or "-"
             cpu = _normalize_cpu_percent(proc.info.get('cpu_percent'))
