@@ -1,5 +1,6 @@
 # main.py
 # Intrusense Phase 1 - main UI with Process UX polish + Network sorting + export
+# UPDATED: Added Process Name search and simplified kill messages.
 
 import os
 import csv
@@ -150,7 +151,6 @@ def set_network_sort(col: str, additive: bool = False):
         else:
             network_sort_priority.append((col, True if col in ("PID",) else False))
     try:
-        refresh_headers(proc_tree, ("PID", "Name", "User", "CPU %", "Memory"))
         update_network_list_sort_and_refresh()
     except Exception:
         pass
@@ -202,13 +202,18 @@ def refresh_headers(tree, columns):
         tree.heading(c, text=text)
 
 
-# ---------- Processes tab ----------
+# ---------- Processes tab (UPDATED for name search) ----------
 
 def update_process_list(tree, status_var, pid_filter_var, columns):
     # Background worker to gather processes and update UI
     def worker():
-        digits_only = ''.join(ch for ch in pid_filter_var.get().strip() if ch.isdigit())
-        proc_rows = process_module.get_process_rows(digits_only)
+        # --- UPDATED: Pass raw text for name search ---
+        filter_text = pid_filter_var.get().strip()
+        
+        # This function expects 5-tuples: (pid, name, user, cpu, mem)
+        proc_rows = process_module.get_process_rows(filter_text)
+        # --- END UPDATE ---
+        
         filtered = []
         for (pid, name, user, cpu, mem) in proc_rows:
             try:
@@ -220,6 +225,7 @@ def update_process_list(tree, status_var, pid_filter_var, columns):
                 continue
             filtered.append((pid, name, user, cpu, mem))
 
+        # This key function expects the 5-tuple structure
         def key_for(col: str, row):
             if col == "PID":
                 return int(row[0])
@@ -238,15 +244,25 @@ def update_process_list(tree, status_var, pid_filter_var, columns):
             filtered.sort(key=lambda r, c=col: key_for(c, r), reverse=desc)
 
         def update_ui():
-            for row in tree.get_children():
-                tree.delete(row)
+            # Save selection/focus
+            selected_iid = tree.selection()
+            
+            tree.delete(*tree.get_children()) # Clear all items
+            
             for idx, (pid, name, user, cpu, mem) in enumerate(filtered):
                 tag = 'evenrow' if idx % 2 == 0 else 'oddrow'
                 display_values = [pid, name, user, f"{cpu:.1f}%", f"{mem:.1f} MB"]
-                tree.insert("", "end", values=tuple(display_values), tags=(tag,))
+                # Insert as flat list
+                tree.insert("", "end", iid=pid, values=tuple(display_values), tags=(tag,))
+                
             status_var.set(
                 f"Processes: {len(filtered)} | Sorted by {[c for c, _ in sort_priority]} | Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
+            
+            # Restore selection if it still exists
+            if selected_iid and tree.exists(selected_iid[0]):
+                tree.selection_set(selected_iid[0])
+
             tree.after(get_refresh_ms(), lambda: update_process_list(tree, status_var, pid_filter_var, columns))
 
         tree.after(0, update_ui)
@@ -555,7 +571,7 @@ def _build_event_details_text(ev: Dict[str, Any]) -> str:
             parts.append(f"Event ID: {eid_str}")
         if level_str:
             parts.append(f"Level: {level_str}")
-        lines.append("     ".join(parts))
+        lines.append("    ".join(parts))
 
     if user and user != "Unavailable":
         lines.append(f"User: {user}")
@@ -701,9 +717,6 @@ def _perform_proc_action(action: str, pid: int, root):
             if action == "terminate":
                 p.terminate()
                 root.after(0, lambda: messagebox.showinfo("Terminate", f"Sent terminate to PID {pid}"))
-            elif action == "kill":
-                p.kill()
-                root.after(0, lambda: messagebox.showinfo("Kill", f"Killed PID {pid}"))
             elif action == "suspend":
                 try:
                     p.suspend()
@@ -745,7 +758,7 @@ def _perform_proc_action(action: str, pid: int, root):
     threading.Thread(target=worker, daemon=True).start()
 
 
-# ---------- Context menu for process tree ----------
+# ---------- Context menu for process tree (UNCHANGED logic, menu text is the same) ----------
 def _on_proc_right_click(event):
     # Show context menu on right-click row
     try:
@@ -766,26 +779,40 @@ def _on_proc_right_click(event):
         menu.add_separator()
         menu.add_command(label="End Task (terminate)", command=lambda: _confirm_and_run("terminate", pid))
         menu.add_command(label="Kill (force)", command=lambda: _confirm_and_run("kill", pid))
+        menu.add_command(label="Kill Process & Children (force)", command=lambda: _confirm_and_run("kill_tree", pid)) # NEW
+        menu.add_separator()
         menu.add_command(label="Suspend", command=lambda: _confirm_and_run("suspend", pid))
         menu.add_command(label="Resume", command=lambda: _confirm_and_run("resume", pid))
         menu.tk_popup(event.x_root, event.y_root)
     except Exception:
         return
 
-
+# ---------- CONFIRMATION DIALOG TEXT (UPDATED) ----------
 def _confirm_and_run(action, pid):
-    # Confirmation dialog then run action
+    # Confirmation dialog then run action (UPDATED)
     try:
         if action == "terminate":
             if not messagebox.askyesno("Confirm terminate", f"Send terminate to PID {pid}?"):
                 return
+            _perform_proc_action(action, pid, root)
+            
         elif action == "kill":
-            if not messagebox.askyesno("Confirm kill", f"Force kill PID {pid}? This may cause data loss."):
+            # --- UPDATED TEXT ---
+            if not messagebox.askyesno("Confirm kill", f"Force kill process {pid}?\n\nThis may cause data loss."):
                 return
+            kill_with_powershell(pid, root, _on_kill_done)
+            
+        elif action == "kill_tree":
+            # --- UPDATED TEXT ---
+            if not messagebox.askyesno("Confirm kill tree", f"Force kill process {pid} and all its children?\n\nThis will cause data loss."):
+                return
+            kill_tree_with_fallback(pid, root, _on_kill_done)
+            
         elif action in ("suspend", "resume"):
             if not messagebox.askyesno("Confirm", f"{action.title()} PID {pid}?"):
                 return
-        _perform_proc_action(action, pid, root)
+            _perform_proc_action(action, pid, root)
+            
     except Exception:
         return
 
@@ -862,7 +889,7 @@ def open_settings_dialog(root):
     ttk.Button(dlg, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=(0,6), pady=12)
 
 
-# ---------- Main UI ----------
+# ---------- Main UI (UPDATED for name search) ----------
 def main():
     global proc_tree, proc_status, pid_filter_var, root, net_tree, net_status
 
@@ -915,7 +942,11 @@ def main():
     search_frame = ttk.Frame(process_frame)
     search_frame.pack(fill=tk.X, padx=5, pady=3)
     pid_filter_var = tk.StringVar()
-    ttk.Label(search_frame, text="Search PID:").pack(side=tk.LEFT, padx=(0, 5))
+    
+    # --- UPDATED: Changed label text ---
+    ttk.Label(search_frame, text="Search (PID or Name):").pack(side=tk.LEFT, padx=(0, 5))
+    # --- END UPDATE ---
+    
     pid_entry = ttk.Entry(search_frame, textvariable=pid_filter_var, width=20)
     pid_entry.pack(side=tk.LEFT)
     ttk.Button(search_frame, text="Clear", command=lambda: pid_filter_var.set("")).pack(side=tk.LEFT, padx=(5, 0))
@@ -1157,7 +1188,13 @@ def main():
 def _run_command(cmd: list, timeout: int = 8) -> dict:
     """Run a command list, return dict with returncode, stdout, stderr."""
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, shell=False)
+        # Prevent console window from flashing
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, shell=False, startupinfo=startupinfo)
         return {"rc": proc.returncode, "out": proc.stdout or "", "err": proc.stderr or ""}
     except subprocess.TimeoutExpired:
         return {"rc": -1, "out": "", "err": "timeout"}
@@ -1167,12 +1204,9 @@ def _run_command(cmd: list, timeout: int = 8) -> dict:
 def kill_with_powershell(pid: int, root, on_done=None):
     """
     Try to kill PID using PowerShell Stop-Process (force). Runs in background.
-    - root: your Tk root or a widget for scheduling UI callbacks via root.after
-    - on_done: optional callback function(result_dict) called on main thread
-    Result dict contains: {'method': 'powershell'|'taskkill'|'none', 'rc': int, 'out': str, 'err': str}
     """
     def worker():
-        result = {"method": "none", "rc": -1, "out": "", "err": ""}
+        result = {"method": "powershell", "rc": -1, "out": "", "err": ""}
 
         if platform.system().lower() != "windows":
             result["err"] = "Not running on Windows"
@@ -1180,7 +1214,6 @@ def kill_with_powershell(pid: int, root, on_done=None):
                 root.after(0, lambda: on_done(result))
             return
 
-        # sanitize PID
         try:
             pid_i = int(pid)
             if pid_i <= 0:
@@ -1191,8 +1224,6 @@ def kill_with_powershell(pid: int, root, on_done=None):
                 root.after(0, lambda: on_done(result))
             return
 
-        # Primary: PowerShell Stop-Process -Force
-        # Use: powershell -NoProfile -NonInteractive -Command "Stop-Process -Id 123 -Force"
         ps_cmd = [
             "powershell",
             "-NoProfile",
@@ -1202,35 +1233,83 @@ def kill_with_powershell(pid: int, root, on_done=None):
             f"Try {{ Stop-Process -Id {pid_i} -Force -ErrorAction Stop; Write-Output 'OK' }} Catch {{ Write-Error $_.Exception.Message; exit 1 }}"
         ]
         r = _run_command(ps_cmd, timeout=10)
-        result.update({"method": "powershell", "rc": r["rc"], "out": r["out"], "err": r["err"]})
+        result.update({"rc": r["rc"], "out": r["out"], "err": r["err"]})
         if r["rc"] == 0:
-            # success
             if on_done:
                 root.after(0, lambda: on_done(result))
             return
 
-        # Fallback: taskkill (older Windows)
+        # Fallback: taskkill
         task_cmd = ["taskkill", "/PID", str(pid_i), "/F"]
         r2 = _run_command(task_cmd, timeout=8)
-        # prefer taskkill result if powershell failed
         result.update({"method": "taskkill", "rc": r2["rc"], "out": r2["out"], "err": r2["err"]})
         if on_done:
             root.after(0, lambda: on_done(result))
 
     threading.Thread(target=worker, daemon=True).start()
 
+def kill_tree_with_fallback(pid: int, root, on_done=None):
+    """
+    Try to kill PID AND ITS CHILDREN using taskkill /T /F.
+    """
+    def worker():
+        result = {"method": "taskkill_tree", "rc": -1, "out": "", "err": ""}
 
+        if platform.system().lower() != "windows":
+            result["err"] = "Not running on Windows"
+            if on_done:
+                root.after(0, lambda: on_done(result))
+            return
+        
+        try:
+            pid_i = int(pid)
+        except Exception:
+            result["err"] = f"Invalid PID: {pid}"
+            if on_done:
+                root.after(0, lambda: on_done(result))
+            return
+
+        # Use taskkill /T (tree) /F (force)
+        task_cmd = ["taskkill", "/PID", str(pid_i), "/T", "/F"]
+        r = _run_command(task_cmd, timeout=10)
+        
+        result.update({"rc": r["rc"], "out": r["out"], "err": r["err"]})
+        
+        if r["rc"] != 0 and "child process" not in (r["err"] or "").lower():
+            # If taskkill /T fails, try to get children with psutil
+            try:
+                parent = psutil.Process(pid_i)
+                children = parent.children(recursive=True)
+                for child in reversed(children):
+                    child.kill()
+                parent.kill()
+                result.update({"method": "psutil_fallback", "rc": 0, "out": "Killed process tree."})
+            except Exception as e:
+                result["err"] = f"taskkill failed and psutil fallback also failed: {e}"
+        
+        if on_done:
+            root.after(0, lambda: on_done(result))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+# ---------- RESULT DIALOG TEXT (UPDATED) ----------
 def _on_kill_done(result):
     """Show message after process kill attempt and refresh process list."""
-    method = result.get("method")
     rc = result.get("rc", -1)
-    out = result.get("out", "").strip()
     err = result.get("err", "").strip()
 
     if rc == 0:
-        messagebox.showinfo("End process", f"Process terminated (method={method}).\n{out}")
+        # --- UPDATED TEXT ---
+        messagebox.showinfo("End process", "The process was successfully terminated.")
     else:
-        messagebox.showerror("End process failed", f"Method={method}, rc={rc}\n{err}\n\nTry running Intrusense as Administrator.")
+        # Specific error for "access denied"
+        if "Access is denied" in err or "Operation could not be completed" in err or "rc=1" in err or "rc=5" in err:
+             # --- UPDATED TEXT ---
+             messagebox.showerror("End process failed", "Access is denied.\n\Try running Intrusense as Administrator.")
+        else:
+            # --- UPDATED TEXT ---
+            messagebox.showerror("End process failed", f"Failed to terminate process.\n\nError: {err}")
 
     # refresh the process list afterward
     try:
